@@ -33,7 +33,7 @@ final class QueryCompilerTest extends TestCase
             '{"from":20,"size":20,"query":{"bool":{"must":[{"match":{"title":{"query":"running shoe"}}}],"filter":[{"range":{"price":{"lte":100}}},'
             . '{"bool":{"must":[{"term":{"in_stock":true}}],"should":[{"term":{"brand":"acme"}}],"must_not":[],"minimum_should_match":1}}]}},'
             . '"sort":[{"_score":{"order":"desc"}}],"aggs":{"brand":{"terms":{"field":"brand","size":5}}},'
-            . '"highlight":{"pre_tags":["<em>"],"post_tags":["<\/em>"],"fields":{"title":{}}}}',
+            . '"highlight":{"encoder":"html","pre_tags":["<em>"],"post_tags":["<\/em>"],"fields":{"title":{}}}}',
             json_encode((new QueryCompiler())->compile($query)),
         );
     }
@@ -63,6 +63,56 @@ final class QueryCompilerTest extends TestCase
         $this->expectException(UnsupportedClause::class);
 
         (new QueryCompiler())->compile(Query::on('products')->match('title', 'x')->vector('embedding', [0.1], k: 2)->fuse(Fusion::reciprocalRank()));
+    }
+
+    public function testScopeFiltersEveryKnnEntryAndAddsNoMatchAll(): void
+    {
+        $scoped = (new QueryCompiler())->scope([
+            'knn' => [
+                ['field' => 'a', 'query_vector' => [1.0], 'k' => 2, 'num_candidates' => 10, 'filter' => ['term' => ['x' => 1]]],
+                ['field' => 'b', 'query_vector' => [1.0], 'k' => 2, 'num_candidates' => 10],
+            ],
+        ], [Filter::term('org_id', 'org_1')]);
+
+        self::assertArrayNotHasKey('query', $scoped);
+        self::assertSame([['term' => ['x' => 1]], ['term' => ['org_id' => 'org_1']]], $scoped['knn'][0]['filter']);
+        self::assertSame([['term' => ['org_id' => 'org_1']]], $scoped['knn'][1]['filter']);
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>}>
+     */
+    public static function escapes(): iterable
+    {
+        yield 'global aggregation' => [['query' => ['match_all' => new stdClass()], 'aggs' => ['g' => ['global' => new stdClass()]]]];
+        yield 'any aggregation' => [['aggs' => ['b' => ['terms' => ['field' => 'brand']]]]];
+        yield 'suggester' => [['suggest' => ['s' => ['text' => 'x', 'term' => ['field' => 'title']]]]];
+        yield 'retriever' => [['retriever' => ['standard' => ['query' => ['match_all' => new stdClass()]]]]];
+        yield 'runtime mappings' => [['runtime_mappings' => ['x' => ['type' => 'keyword']]]];
+        yield 'script fields' => [['script_fields' => ['x' => ['script' => 'doc']]]];
+    }
+
+    /**
+     * @param array<string, mixed> $body
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('escapes')]
+    public function testAScopedNativeBodyMayNotReadOutsideTheScope(array $body): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        (new QueryCompiler())->scope($body, [Filter::term('org_id', 'org_1')]);
+    }
+
+    public function testAnUnscopedNativeBodyIsLeftAlone(): void
+    {
+        $body = ['suggest' => ['s' => ['text' => 'x', 'term' => ['field' => 'title']]]];
+
+        self::assertSame($body, (new QueryCompiler())->scope($body, []));
+    }
+
+    public function testHighlightsAreHtmlEncodedByTheEngine(): void
+    {
+        self::assertSame('html', (new QueryCompiler())->compile(Query::on('products')->match('title', 'x')->highlight('title'))['highlight']['encoder']);
     }
 
     public function testTheEscapeHatchIsAndedWithTheScope(): void

@@ -42,21 +42,30 @@ final class Mapping
 
     /**
      * The create-index body: mappings, the analyzers folding needs, then the schema's `native('elasticsearch')`
-     * settings (`settings` and `mappings` keys) merged over them.
+     * `settings` and `mappings` merged over them. The merge cannot loosen the contract: the mapping stays
+     * `dynamic: strict` and its `_meta` stays Orion's.
      *
      * @return array<string, mixed>
      */
     public static function create(IndexSchema $schema, string $engine): array
     {
-        $body = [
-            'settings' => ['analysis' => ['analyzer' => self::analyzers($schema->fields)]],
-            'mappings' => self::mappings($schema->fields),
-        ];
-        if ($body['settings']['analysis']['analyzer'] === []) {
-            unset($body['settings']);
+        $mappings = self::mappings($schema->fields);
+        [$analyzers, $filters] = self::analysis($schema->fields);
+        $body = ['mappings' => $mappings];
+        if ($analyzers !== []) {
+            $body = ['settings' => ['analysis' => ['analyzer' => $analyzers, ...($filters === [] ? [] : ['filter' => $filters])]], ...$body];
         }
+        $native = $schema->native[$engine] ?? [];
+        foreach ($native as $key => $_) {
+            if ($key !== 'settings' && $key !== 'mappings') {
+                throw new InvalidArgumentException(sprintf('Native Elasticsearch settings take "settings" and "mappings" only, not %s.', Assert::show((string) $key)));
+            }
+        }
+        $body = array_replace_recursive($body, $native);
+        $body['mappings']['dynamic'] = $mappings['dynamic'];
+        $body['mappings']['_meta'] = $mappings['_meta'];
 
-        return array_replace_recursive($body, $schema->native[$engine] ?? []);
+        return $body;
     }
 
     /**
@@ -94,24 +103,33 @@ final class Mapping
     }
 
     /**
+     * The custom analyzers folding needs, and the named stemmer filters they reference (Elasticsearch accepts only
+     * filter names inside an analyzer definition).
+     *
      * @param list<Field> $fields
-     * @return array<string, array<string, mixed>>
+     * @return array{array<string, array<string, mixed>>, array<string, array<string, string>>}
      */
-    private static function analyzers(array $fields): array
+    public static function analysis(array $fields): array
     {
         $analyzers = [];
+        $filters = [];
         foreach ($fields as $field) {
-            if ($field->type === FieldType::Text && $field->folding) {
-                $filters = ['lowercase', 'asciifolding'];
+            $name = self::analyzer($field);
+            if ($field->type === FieldType::Text && $field->folding && $name !== null) {
+                $chain = ['lowercase', 'asciifolding'];
                 if ($field->language !== null) {
-                    $filters[] = ['type' => 'stemmer', 'language' => self::language($field->language)];
+                    $filter = 'orion_' . $field->language . '_stemmer';
+                    $filters[$filter] = ['type' => 'stemmer', 'language' => self::language($field->language)];
+                    $chain[] = $filter;
                 }
-                $analyzers[self::analyzer($field)] = ['type' => 'custom', 'tokenizer' => 'standard', 'filter' => $filters];
+                $analyzers[$name] = ['type' => 'custom', 'tokenizer' => 'standard', 'filter' => $chain];
             }
-            $analyzers = [...$analyzers, ...self::analyzers($field->fields)];
+            [$childAnalyzers, $childFilters] = self::analysis($field->fields);
+            $analyzers = [...$analyzers, ...$childAnalyzers];
+            $filters = [...$filters, ...$childFilters];
         }
 
-        return $analyzers;
+        return [$analyzers, $filters];
     }
 
     /**

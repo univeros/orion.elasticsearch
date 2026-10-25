@@ -51,6 +51,26 @@ final class MappingTest extends TestCase
         self::assertSame(0, $body['settings']['number_of_replicas']);
     }
 
+    public function testNativeSettingsCannotLoosenTheMappingOrForgeItsMeta(): void
+    {
+        $body = Mapping::create(IndexSchema::for('products')->keyword('sku')->native('elasticsearch', ['mappings' => [
+            'dynamic' => true,
+            '_meta' => ['orion' => ['fields' => ['forged' => ['type' => 'keyword']]]],
+            'properties' => ['sku' => ['type' => 'keyword', 'ignore_above' => 64]],
+        ]]), 'elasticsearch');
+
+        self::assertSame('strict', $body['mappings']['dynamic']);
+        self::assertSame(['sku' => ['type' => 'keyword']], $body['mappings']['_meta']['orion']['fields']);
+        self::assertSame(64, $body['mappings']['properties']['sku']['ignore_above']);
+    }
+
+    public function testNativeSettingsAreSettingsAndMappingsOnly(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        Mapping::create(IndexSchema::for('products')->keyword('sku')->native('elasticsearch', ['aliases' => ['all' => new \stdClass()]]), 'elasticsearch');
+    }
+
     public function testNativeTypesWithoutANeutralEquivalentAreUnknown(): void
     {
         $fields = Mapping::fields(['properties' => [

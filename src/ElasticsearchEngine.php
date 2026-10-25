@@ -6,6 +6,7 @@ namespace Orion\Elasticsearch;
 
 use Elastic\Elasticsearch\Client;
 use Elastic\Elasticsearch\Response\Elasticsearch;
+use InvalidArgumentException;
 use LogicException;
 use Orion\Adapter\Capability;
 use Orion\Adapter\PendingTask;
@@ -25,19 +26,22 @@ use Orion\Schema\MigrationPlan;
 use Orion\Write\BulkResult;
 use Orion\Write\Document;
 use Orion\Write\Tombstone;
-use Orion\Write\WriteOutcome;
 use Override;
 use stdClass;
 
+use function array_diff;
+use function array_fill;
 use function array_key_first;
+use function array_keys;
 use function array_map;
 use function array_replace_recursive;
 use function array_values;
 use function count;
 use function explode;
+use function implode;
 use function in_array;
 use function is_array;
-use function is_string;
+use function is_scalar;
 use function sprintf;
 
 /**
@@ -53,8 +57,6 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
         Capability::Vectors, Capability::NestedDocuments, Capability::Facets, Capability::Highlighting,
         Capability::NativeAliases, Capability::CursorPagination, Capability::FunctionScore, Capability::OptimisticConcurrency,
     ];
-    private const int CONFLICT = 409;
-    private const int NOT_FOUND = 404;
 
     private readonly QueryCompiler $compiler;
 
@@ -98,14 +100,9 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
     #[Override]
     public function inspect(IndexName $index): ?LiveSchema
     {
-        if (!$this->exists($index)) {
-            return null;
-        }
-        $response = $this->call($this->client->indices()->getMapping(['index' => $index->value]));
-        $concrete = $response[array_key_first($response)] ?? [];
-        $mapping = is_array($concrete) && is_array($concrete['mappings'] ?? null) ? $concrete['mappings'] : [];
+        $mapping = $this->mapping($index);
 
-        return new LiveSchema($index, Mapping::fields($mapping));
+        return $mapping === null ? null : new LiveSchema($index, Mapping::fields($mapping));
     }
 
     #[Override]
@@ -114,25 +111,34 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
         return MigrationPlan::between($desired, $this->inspect($desired->index));
     }
 
+    /**
+     * Adds the plan's new fields with one mapping update. Analysis cannot be added to a live index, so a new field
+     * needing an analyzer the index lacks is refused like a breaking change: it needs a reindex.
+     */
     #[Override]
     public function apply(MigrationPlan $plan): PendingTask
     {
-        if ($plan->requiresReindex()) {
-            throw new LogicException(sprintf('The plan for %s has breaking changes; they need a reindex, never an in-place apply.', $plan->index->value));
-        }
-        $live = $this->inspect($plan->index) ?? throw new LogicException(sprintf('The index %s does not exist; ensure it first.', $plan->index->value));
-        $fields = $live->fields;
+        $mapping = $this->mapping($plan->index) ?? throw new LogicException(sprintf('The index %s does not exist; ensure it first.', $plan->index->value));
+        $fields = $plan->applyTo(Mapping::fields($mapping));
         $added = [];
+        $addedFields = [];
         foreach ($plan->additive() as $change) {
             if ($change->kind === ChangeKind::Added && $change->after !== null) {
-                $fields = Field::addAt($fields, $change->path, $change->after);
                 $added = array_replace_recursive($added, self::nest(explode('.', $change->path), $change->after));
+                $addedFields[] = $change->after;
             }
         }
-        if ($added !== []) {
-            $mappings = Mapping::mappings($fields);
-            $this->call($this->client->indices()->putMapping(['index' => $plan->index->value, 'body' => ['_meta' => $mappings['_meta'], 'properties' => $added]]));
+        if ($added === []) {
+            return PendingTask::completed();
         }
+        $missing = array_diff(array_keys(Mapping::analysis($addedFields)[0]), $this->analyzers($plan->index));
+        if ($missing !== []) {
+            throw new LogicException(sprintf('The plan for %s adds fields needing analysis the live index lacks (%s); that needs a reindex.', $plan->index->value, implode(', ', $missing)));
+        }
+        // Only Orion's key of _meta is rewritten; anything else a host keeps there survives.
+        $meta = is_array($mapping['_meta'] ?? null) ? $mapping['_meta'] : [];
+        $meta['orion'] = Mapping::mappings($fields)['_meta']['orion'];
+        $this->call($this->client->indices()->putMapping(['index' => $plan->index->value, 'body' => ['_meta' => $meta, 'properties' => $added]]));
 
         return PendingTask::completed();
     }
@@ -154,7 +160,7 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
             $body[] = $doc->fields === [] ? new stdClass() : $doc->fields;
         }
 
-        return $this->bulk($body, count($docs));
+        return $this->bulk($index, $body, array_values(array_map(static fn(Document $doc): string => $doc->id, $docs)), 'index');
     }
 
     #[Override]
@@ -165,7 +171,7 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
             $body[] = ['delete' => ['_index' => $index->value, '_id' => $tombstone->id, 'version' => $tombstone->version, 'version_type' => 'external']];
         }
 
-        return $this->bulk($body, count($tombstones));
+        return $this->bulk($index, $body, array_values(array_map(static fn(Tombstone $tombstone): string => $tombstone->id, $tombstones)), 'delete');
     }
 
     #[Override]
@@ -175,40 +181,23 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
     }
 
     /**
+     * Bulk writes would auto-create a missing index with a dynamic mapping, so the index must exist first.
+     *
      * @param list<array<string, mixed>|stdClass> $body
+     * @param list<string> $ids
+     * @param 'index'|'delete' $operation
      */
-    private function bulk(array $body, int $count): BulkResult
+    private function bulk(IndexName $index, array $body, array $ids, string $operation): BulkResult
     {
-        if ($count === 0) {
+        if (!$this->exists($index)) {
+            throw new InvalidArgumentException(sprintf('The index %s does not exist; ensure it first.', $index->value));
+        }
+        if ($ids === []) {
             return BulkResult::completed();
         }
         $response = $this->call($this->client->bulk(['body' => $body]));
-        $outcomes = [];
-        foreach (is_array($response['items'] ?? null) ? $response['items'] : [] as $item) {
-            $result = is_array($item) ? (array) ($item['index'] ?? $item['delete'] ?? []) : [];
-            $outcomes[] = self::outcome($result);
-        }
 
-        return BulkResult::completed(...$outcomes);
-    }
-
-    /**
-     * @param array<array-key, mixed> $result one bulk item
-     */
-    private static function outcome(array $result): WriteOutcome
-    {
-        $id = (string) ($result['_id'] ?? '');
-        $status = (int) ($result['status'] ?? 0);
-        if ($status === self::CONFLICT) {
-            return WriteOutcome::stale($id);
-        }
-        if (isset($result['error']) && $status !== self::NOT_FOUND) {
-            $error = is_array($result['error']) ? (string) ($result['error']['type'] ?? '') . ': ' . (string) ($result['error']['reason'] ?? '') : (string) $result['error'];
-
-            return WriteOutcome::failed($id, $error);
-        }
-
-        return WriteOutcome::applied($id);
+        return BulkResult::completed(...BulkResponse::outcomes($response, $ids, array_fill(0, count($ids), $operation)));
     }
 
     /**
@@ -223,7 +212,7 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
             }
             $highlights = [];
             foreach ((array) ($hit['highlight'] ?? []) as $field => $fragments) {
-                $highlights[(string) $field] = array_values(array_map(static fn($fragment): string => (string) $fragment, (array) $fragments));
+                $highlights[(string) $field] = array_values(array_map(static fn($fragment): string => is_scalar($fragment) ? (string) $fragment : '', (array) $fragments));
             }
             $hits[] = new Hit((string) ($hit['_id'] ?? ''), (float) ($hit['_score'] ?? 0.0), (array) ($hit['_source'] ?? []), $highlights);
         }
@@ -240,6 +229,35 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
         }
 
         return new ResultSet($hits, (int) ($total['value'] ?? count($hits)), ($total['relation'] ?? 'eq') !== 'eq', $facets, (float) ($response['took'] ?? 0));
+    }
+
+    /**
+     * @return array<string, mixed>|null the index's `mappings`, or null when it does not exist
+     */
+    private function mapping(IndexName $index): ?array
+    {
+        if (!$this->exists($index)) {
+            return null;
+        }
+        $response = $this->call($this->client->indices()->getMapping(['index' => $index->value]));
+        $concrete = $response[array_key_first($response)] ?? [];
+
+        /** @var array<string, mixed> */
+        return is_array($concrete) && is_array($concrete['mappings'] ?? null) ? $concrete['mappings'] : [];
+    }
+
+    /**
+     * @return list<string> the custom analyzers defined on the index
+     */
+    private function analyzers(IndexName $index): array
+    {
+        $response = $this->call($this->client->indices()->getSettings(['index' => $index->value]));
+        $concrete = (array) ($response[array_key_first($response)] ?? []);
+        $settings = (array) ($concrete['settings'] ?? []);
+        $index = (array) ($settings['index'] ?? []);
+        $analysis = (array) ($index['analysis'] ?? []);
+
+        return array_map(static fn(int|string $name): string => (string) $name, array_keys((array) ($analysis['analyzer'] ?? [])));
     }
 
     private function exists(IndexName $index): bool

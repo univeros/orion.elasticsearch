@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Orion\Elasticsearch;
 
+use InvalidArgumentException;
 use LogicException;
 use Orion\Adapter\Capability;
 use Orion\Adapter\UnsupportedClause;
@@ -18,14 +19,19 @@ use Orion\Query\RangeFilter;
 use Orion\Query\Sort;
 use Orion\Query\TermFilter;
 use Orion\Query\TermsFilter;
+use Orion\Support\Assert;
 use stdClass;
 
 use function array_filter;
+use function array_is_list;
 use function array_map;
 use function array_values;
+use function implode;
+use function in_array;
 use function is_array;
 use function max;
 use function min;
+use function sprintf;
 
 /**
  * The neutral query AST compiled to an Elasticsearch search body: a pure function, so the same query always
@@ -34,6 +40,12 @@ use function min;
  */
 final class QueryCompiler
 {
+    /** Top-level search keys that only narrow, page, sort or present the scoped documents. */
+    private const array SCOPED_KEYS = [
+        'query', 'knn', 'size', 'from', 'sort', '_source', 'highlight', 'post_filter', 'track_total_hits',
+        'min_score', 'search_after', 'rescore', 'collapse', 'timeout',
+    ];
+
     /** Candidates per k-NN shard: ten times k, within Elasticsearch's bounds. */
     private const int CANDIDATE_FACTOR = 10;
     private const int MIN_CANDIDATES = 100;
@@ -86,28 +98,47 @@ final class QueryCompiler
             foreach ($query->highlights as $field) {
                 $fields[$field] = new stdClass();
             }
-            $body['highlight'] = ['pre_tags' => ['<em>'], 'post_tags' => ['</em>'], 'fields' => $fields];
+            // The html encoder escapes the stored text, so a fragment's only markup is the <em> around matches.
+            $body['highlight'] = ['encoder' => 'html', 'pre_tags' => ['<em>'], 'post_tags' => ['</em>'], 'fields' => $fields];
         }
 
         return $body;
     }
 
     /**
-     * A native body restricted by neutral filters, for the scoped escape hatch.
+     * A native body restricted by neutral filters, for the scoped escape hatch. Under a scope only keys that act
+     * within the matched documents are accepted; anything that reads index-wide (aggregations, suggesters,
+     * retrievers, runtime fields, scripts) is refused, because the scope is what keeps one tenant from another.
+     * The filters are ANDed with the query (when there is one) and with every k-NN entry.
      *
-     * @param array<string, mixed> $body
+     * @param array<array-key, mixed> $body
      * @param array<Filter> $scope
-     * @return array<string, mixed>
+     * @return array<array-key, mixed>
      */
     public function scope(array $body, array $scope): array
     {
         if ($scope === []) {
             return $body;
         }
+        foreach ($body as $key => $_) {
+            if (!in_array($key, self::SCOPED_KEYS, true)) {
+                throw new InvalidArgumentException(sprintf('A scoped native query cannot use %s: it reads outside the scope. Allowed: %s.', Assert::show((string) $key), implode(', ', self::SCOPED_KEYS)));
+            }
+        }
         $filters = array_map($this->filter(...), array_values($scope));
-        $body['query'] = ['bool' => ['must' => [$body['query'] ?? ['match_all' => new stdClass()]], 'filter' => $filters]];
-        if (isset($body['knn']) && is_array($body['knn'])) {
-            $body['knn']['filter'] = [...(array) ($body['knn']['filter'] ?? []), ...$filters];
+        if (isset($body['query']) || !isset($body['knn'])) {
+            $body['query'] = ['bool' => ['must' => [$body['query'] ?? ['match_all' => new stdClass()]], 'filter' => $filters]];
+        }
+        if (isset($body['knn'])) {
+            $entries = is_array($body['knn']) && array_is_list($body['knn']) ? $body['knn'] : [$body['knn']];
+            $body['knn'] = array_map(static function (mixed $entry) use ($filters): array {
+                $entry = (array) $entry;
+                $existing = $entry['filter'] ?? [];
+                $existing = is_array($existing) && array_is_list($existing) ? $existing : [$existing];
+                $entry['filter'] = [...$existing, ...$filters];
+
+                return $entry;
+            }, $entries);
         }
 
         return $body;
