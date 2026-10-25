@@ -1,0 +1,41 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Orion\Elasticsearch\Tests;
+
+use Elastic\Elasticsearch\ClientBuilder;
+use Orion\Adapter\SchemaAdapter;
+use Orion\Adapter\SearchAdapter;
+use Orion\Adapter\WriteAdapter;
+use Orion\Elasticsearch\ElasticsearchEngine;
+use Orion\Testing\EngineConformanceTestCase;
+use stdClass;
+
+use function getenv;
+
+/**
+ * Runs the engine conformance case against the server at the URL in {@see urlVariable()}; skipped when it is unset.
+ */
+abstract class ElasticsearchConformance extends EngineConformanceTestCase
+{
+    abstract protected static function urlVariable(): string;
+
+    protected function setUp(): void
+    {
+        if (getenv(static::urlVariable()) === false) {
+            self::markTestSkipped(static::urlVariable() . ' is not set.');
+        }
+        parent::setUp();
+    }
+
+    protected function createEngine(): SearchAdapter&SchemaAdapter&WriteAdapter
+    {
+        return new ElasticsearchEngine(ClientBuilder::create()->setHosts([(string) getenv(static::urlVariable())])->build());
+    }
+
+    protected function nativeMatchAll(): callable
+    {
+        return static fn(): array => ['query' => ['match_all' => new stdClass()], 'size' => 100];
+    }
+}

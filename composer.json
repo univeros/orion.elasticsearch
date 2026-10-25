@@ -1,0 +1,51 @@
+{
+    "name": "orion-search/elasticsearch",
+    "description": "Orion engine adapter for Elasticsearch 8.19 and 9.x on the official client: strict mappings, externally versioned writes and deletes, the neutral query AST compiled to DSL",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "2am.tech",
+            "homepage": "https://2am.tech"
+        }
+    ],
+    "keywords": [
+        "search",
+        "elasticsearch",
+        "reindex",
+        "hybrid-search",
+        "vector-search"
+    ],
+    "require": {
+        "php": ">=8.3",
+        "elasticsearch/elasticsearch": "^8.19 || ^9.0",
+        "orion-search/core": "^0.1"
+    },
+    "require-dev": {
+        "guzzlehttp/guzzle": "^7.9",
+        "orion-search/testing": "^0.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "Orion\\Elasticsearch\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Orion\\Elasticsearch\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "branch-alias": {
+            "dev-main": "0.1.x-dev"
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": false
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
