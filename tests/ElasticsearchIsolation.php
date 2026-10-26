@@ -12,6 +12,7 @@ use Orion\Elasticsearch\ElasticsearchEngine;
 use Orion\Testing\TenancyIsolationTestCase;
 use stdClass;
 
+use function base64_encode;
 use function getenv;
 
 /**
@@ -60,6 +61,9 @@ abstract class ElasticsearchIsolation extends TenancyIsolationTestCase
             'suggester' => static fn(): array => ['suggest' => ['s' => ['text' => 'globx', 'term' => ['field' => 'title']]]],
             'retriever' => static fn(): array => ['retriever' => ['standard' => ['query' => ['match_all' => new stdClass()]]]],
             'runtime field' => static fn(): array => ['runtime_mappings' => ['x' => ['type' => 'keyword']], 'query' => ['match_all' => new stdClass()]],
+            'terms lookup of a foreign document' => fn(): array => ['query' => ['terms' => ['brand' => ['index' => $this->indexName(), 'id' => 'globex:p1', 'path' => 'brand']]]],
+            'more like a foreign document' => fn(): array => ['query' => ['more_like_this' => ['fields' => ['title'], 'like' => [['_index' => $this->indexName(), '_id' => 'globex:p1']], 'min_term_freq' => 1, 'min_doc_freq' => 1]]],
+            'a wrapped query' => static fn(): array => ['query' => ['wrapper' => ['query' => base64_encode('{"match_all":{}}')]]],
         ];
     }
 }

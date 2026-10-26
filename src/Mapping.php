@@ -12,8 +12,10 @@ use Orion\Schema\VectorMetric;
 use Orion\Support\Assert;
 
 use function array_flip;
+use function array_key_exists;
 use function array_replace_recursive;
 use function is_array;
+use function in_array;
 use function is_int;
 use function is_string;
 use function preg_match;
@@ -61,11 +63,45 @@ final class Mapping
                 throw new InvalidArgumentException(sprintf('Native Elasticsearch settings take "settings" and "mappings" only, not %s.', Assert::show((string) $key)));
             }
         }
+        if ($schema->orgKey !== null) {
+            self::refuseOrgKeyChanges(is_array($native['mappings'] ?? null) ? $native['mappings'] : [], $schema->orgKey);
+        }
         $body = array_replace_recursive($body, $native);
         $body['mappings']['dynamic'] = $mappings['dynamic'];
         $body['mappings']['_meta'] = $mappings['_meta'];
 
         return $body;
+    }
+
+    /**
+     * The org key is the tenant boundary on a shared index: native mappings may not retype, normalize or shadow it, nor
+     * copy another field's values into it, any of which would let one tenant's filter match another's documents.
+     *
+     * @param array<array-key, mixed> $mappings
+     */
+    private static function refuseOrgKeyChanges(array $mappings, string $orgKey): void
+    {
+        foreach (['properties', 'runtime'] as $section) {
+            if (is_array($mappings[$section] ?? null) && array_key_exists($orgKey, $mappings[$section])) {
+                throw new InvalidArgumentException(sprintf('Native Elasticsearch mappings cannot redefine the org key %s.', Assert::show($orgKey)));
+            }
+        }
+        self::refuseCopiesInto($mappings, $orgKey);
+    }
+
+    /**
+     * @param array<array-key, mixed> $node
+     */
+    private static function refuseCopiesInto(array $node, string $orgKey): void
+    {
+        foreach ($node as $key => $value) {
+            if ($key === 'copy_to' && in_array($orgKey, (array) $value, true)) {
+                throw new InvalidArgumentException(sprintf('Native Elasticsearch mappings cannot copy values into the org key %s.', Assert::show($orgKey)));
+            }
+            if (is_array($value)) {
+                self::refuseCopiesInto($value, $orgKey);
+            }
+        }
     }
 
     /**

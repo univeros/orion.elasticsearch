@@ -64,6 +64,37 @@ final class MappingTest extends TestCase
         self::assertSame(64, $body['mappings']['properties']['sku']['ignore_above']);
     }
 
+    /**
+     * @return iterable<string, array{array<string, mixed>}>
+     */
+    public static function orgKeyOverrides(): iterable
+    {
+        yield 'retyped as text' => [['properties' => ['org_id' => ['type' => 'text']]]];
+        yield 'normalized' => [['properties' => ['org_id' => ['type' => 'keyword', 'normalizer' => 'lowercase']]]];
+        yield 'shadowed by a runtime field' => [['runtime' => ['org_id' => ['type' => 'keyword', 'script' => "emit('acme')"]]]];
+        yield 'copied into from another field' => [['properties' => ['title' => ['type' => 'text', 'copy_to' => 'org_id']]]];
+        yield 'copied into from a nested field' => [['properties' => ['meta' => ['properties' => ['owner' => ['type' => 'keyword', 'copy_to' => ['x', 'org_id']]]]]]];
+    }
+
+    /**
+     * @param array<string, mixed> $mappings
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('orgKeyOverrides')]
+    public function testNativeMappingsCannotTouchTheOrgKey(array $mappings): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('org_id');
+
+        Mapping::create(IndexSchema::for('products')->text('title')->orgKey('org_id')->native('elasticsearch', ['mappings' => $mappings]), 'elasticsearch');
+    }
+
+    public function testNativeMappingsMayStillNameTheOrgKeyElsewhere(): void
+    {
+        $body = Mapping::create(IndexSchema::for('products')->text('title')->orgKey('org_id')->native('elasticsearch', ['mappings' => ['_source' => ['excludes' => ['org_id']]]]), 'elasticsearch');
+
+        self::assertSame(['org_id'], $body['mappings']['_source']['excludes']);
+    }
+
     public function testNativeSettingsAreSettingsAndMappingsOnly(): void
     {
         $this->expectException(\InvalidArgumentException::class);

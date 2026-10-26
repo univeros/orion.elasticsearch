@@ -29,6 +29,7 @@ use function array_values;
 use function implode;
 use function in_array;
 use function is_array;
+use function is_object;
 use function max;
 use function min;
 use function sprintf;
@@ -45,6 +46,13 @@ final class QueryCompiler
         'query', 'knn', 'size', 'from', 'sort', '_source', 'highlight', 'post_filter', 'track_total_hits',
         'min_score', 'search_after', 'rescore', 'collapse', 'timeout',
     ];
+
+    /**
+     * Keys that, anywhere in a scoped body, read a document by reference (terms lookup, more-like-this documents,
+     * percolation, indexed shapes) or hide a query from inspection (`wrapper`): each would let a query use another
+     * tenant's document even though only the tenant's documents come back.
+     */
+    private const array REFERENCE_KEYS = ['index', '_index', 'more_like_this', 'percolate', 'indexed_shape', 'wrapper'];
 
     /** Candidates per k-NN shard: ten times k, within Elasticsearch's bounds. */
     private const int CANDIDATE_FACTOR = 10;
@@ -125,6 +133,7 @@ final class QueryCompiler
                 throw new InvalidArgumentException(sprintf('A scoped native query cannot use %s: it reads outside the scope. Allowed: %s.', Assert::show((string) $key), implode(', ', self::SCOPED_KEYS)));
             }
         }
+        self::refuseReferences($body);
         $filters = array_map($this->filter(...), array_values($scope));
         if (isset($body['query']) || !isset($body['knn'])) {
             $body['query'] = ['bool' => ['must' => [$body['query'] ?? ['match_all' => new stdClass()]], 'filter' => $filters]];
@@ -142,6 +151,21 @@ final class QueryCompiler
         }
 
         return $body;
+    }
+
+    /**
+     * @param array<array-key, mixed> $node
+     */
+    private static function refuseReferences(array $node): void
+    {
+        foreach ($node as $key => $value) {
+            if (in_array($key, self::REFERENCE_KEYS, true)) {
+                throw new InvalidArgumentException(sprintf('A scoped native query cannot use %s: it reads documents outside the scope by reference.', Assert::show((string) $key)));
+            }
+            if (is_array($value) || is_object($value)) {
+                self::refuseReferences((array) $value);
+            }
+        }
     }
 
     /**

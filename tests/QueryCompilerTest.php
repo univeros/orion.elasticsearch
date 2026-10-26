@@ -90,6 +90,23 @@ final class QueryCompilerTest extends TestCase
         yield 'retriever' => [['retriever' => ['standard' => ['query' => ['match_all' => new stdClass()]]]]];
         yield 'runtime mappings' => [['runtime_mappings' => ['x' => ['type' => 'keyword']]]];
         yield 'script fields' => [['script_fields' => ['x' => ['script' => 'doc']]]];
+        yield 'terms lookup of a foreign document' => [['query' => ['terms' => ['brand' => ['index' => 'products', 'id' => 'globex:p1', 'path' => 'brand']]]]];
+        yield 'terms lookup nested in bool' => [['query' => ['bool' => ['filter' => [['terms' => ['brand' => ['index' => 'products', 'id' => 'globex:p1', 'path' => 'brand']]]]]]]];
+        yield 'more like a foreign document' => [['query' => ['more_like_this' => ['fields' => ['title'], 'like' => [['_index' => 'products', '_id' => 'globex:p1']]]]]];
+        yield 'percolate a foreign document' => [['query' => ['percolate' => ['field' => 'q', 'index' => 'products', 'id' => 'globex:p1']]]];
+        yield 'an indexed shape' => [['query' => ['geo_shape' => ['area' => ['indexed_shape' => ['index' => 'shapes', 'id' => 'globex:s1', 'path' => 'area']]]]]];
+        yield 'a wrapped query, uninspectable' => [['query' => ['wrapper' => ['query' => 'eyJtYXRjaF9hbGwiOnt9fQ==']]]];
+        yield 'a lookup in the k-NN filter' => [['knn' => ['field' => 'v', 'query_vector' => [1.0], 'k' => 1, 'num_candidates' => 1, 'filter' => ['terms' => ['brand' => ['index' => 'products', 'id' => 'globex:p1', 'path' => 'brand']]]]]];
+        yield 'a lookup in the rescore query' => [['query' => ['match_all' => new stdClass()], 'rescore' => ['query' => ['rescore_query' => ['more_like_this' => ['like' => [['_id' => 'globex:p1']]]]]]]];
+    }
+
+    public function testAScopedBodyMayStillUseOrdinaryTermsAndQueries(): void
+    {
+        $body = ['query' => ['bool' => ['must' => [['terms' => ['brand' => ['a', 'b']]], ['match' => ['title' => 'index']]]]]];
+
+        $scoped = (new QueryCompiler())->scope($body, [Filter::term('org_id', 'org_1')]);
+
+        self::assertSame($body['query'], $scoped['query']['bool']['must'][0]);
     }
 
     /**
