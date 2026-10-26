@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Orion\Elasticsearch;
 
 use Elastic\Elasticsearch\Client;
+use Elastic\Elasticsearch\ClientBuilder;
 use Elastic\Elasticsearch\Response\Elasticsearch;
 use InvalidArgumentException;
 use LogicException;
@@ -64,6 +65,19 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
     public function __construct(private readonly Client $client)
     {
         $this->compiler = new QueryCompiler(self::NAME);
+    }
+
+    /**
+     * An engine on the official client for these hosts (`http://host:9200`), for hosts that configure Orion from the
+     * environment rather than building the client themselves.
+     */
+    public static function connect(string ...$hosts): self
+    {
+        if ($hosts === []) {
+            throw new InvalidArgumentException('Elasticsearch needs at least one host URL.');
+        }
+
+        return new self(ClientBuilder::create()->setHosts(array_values($hosts))->build());
     }
 
     #[Override]
@@ -160,6 +174,24 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
             ['remove' => ['index' => '*', 'alias' => $alias->value, 'must_exist' => false]],
             ['add' => ['index' => $physical->value, 'alias' => $alias->value]],
         ]]]));
+    }
+
+    #[Override]
+    public function resolve(IndexName $alias): ?IndexName
+    {
+        $exists = $this->client->indices()->existsAlias(['name' => $alias->value]);
+        if (!$exists instanceof Elasticsearch) {
+            throw new LogicException('The Elasticsearch client must run synchronously.');
+        }
+        if (!$exists->asBool()) {
+            return null;
+        }
+        $indices = array_keys($this->call($this->client->indices()->getAlias(['name' => $alias->value])));
+        if (count($indices) !== 1) {
+            throw new LogicException(sprintf('The alias %s points at %d indices; Orion keeps exactly one behind an alias.', $alias->value, count($indices)));
+        }
+
+        return IndexName::of((string) $indices[0]);
     }
 
     #[Override]
