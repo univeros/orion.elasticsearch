@@ -151,6 +151,15 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
         }
     }
 
+    public function alias(IndexName $alias, IndexName $physical): void
+    {
+        // One request, applied atomically: off whatever it pointed at (nothing, the first time), onto the new index.
+        $this->call($this->client->indices()->updateAliases(['body' => ['actions' => [
+            ['remove' => ['index' => '*', 'alias' => $alias->value, 'must_exist' => false]],
+            ['add' => ['index' => $physical->value, 'alias' => $alias->value]],
+        ]]]));
+    }
+
     #[Override]
     public function index(IndexName $index, Document ...$docs): BulkResult
     {
