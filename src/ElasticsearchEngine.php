@@ -123,7 +123,7 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
         $added = [];
         $addedFields = [];
         foreach ($plan->additive() as $change) {
-            if ($change->kind === ChangeKind::Added && $change->after !== null) {
+            if ($change->kind === ChangeKind::Added && $change->after instanceof Field) {
                 $added = array_replace_recursive($added, self::nest(explode('.', $change->path), $change->after));
                 $addedFields[] = $change->after;
             }
