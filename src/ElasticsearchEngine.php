@@ -10,6 +10,7 @@ use InvalidArgumentException;
 use LogicException;
 use Orion\Adapter\Capability;
 use Orion\Adapter\PendingTask;
+use Orion\Adapter\RequiresReindex;
 use Orion\Adapter\SchemaAdapter;
 use Orion\Adapter\SearchAdapter;
 use Orion\Adapter\WriteAdapter;
@@ -133,7 +134,7 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
         }
         $missing = array_diff(array_keys(Mapping::analysis($addedFields)[0]), $this->analyzers($plan->index));
         if ($missing !== []) {
-            throw new LogicException(sprintf('The plan for %s adds fields needing analysis the live index lacks (%s); that needs a reindex.', $plan->index->value, implode(', ', $missing)));
+            throw RequiresReindex::for($plan->index, sprintf('it adds fields needing analysis the live index lacks (%s).', implode(', ', $missing)));
         }
         // Only Orion's key of _meta is rewritten; anything else a host keeps there survives.
         $meta = is_array($mapping['_meta'] ?? null) ? $mapping['_meta'] : [];
@@ -151,6 +152,7 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
         }
     }
 
+    #[Override]
     public function alias(IndexName $alias, IndexName $physical): void
     {
         // One request, applied atomically: off whatever it pointed at (nothing, the first time), onto the new index.
