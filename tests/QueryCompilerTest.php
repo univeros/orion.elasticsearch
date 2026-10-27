@@ -15,6 +15,7 @@ use Orion\Query\Sort;
 use PHPUnit\Framework\TestCase;
 use stdClass;
 
+use function json_decode;
 use function json_encode;
 
 final class QueryCompilerTest extends TestCase
@@ -90,8 +91,72 @@ final class QueryCompilerTest extends TestCase
         ], [Filter::term('org_id', 'org_1')]);
 
         self::assertArrayNotHasKey('query', $scoped);
-        self::assertSame([['term' => ['x' => 1]], ['term' => ['org_id' => 'org_1']]], $scoped['knn'][0]['filter']);
-        self::assertSame([['term' => ['org_id' => 'org_1']]], $scoped['knn'][1]['filter']);
+        self::assertSame(
+            '[{"field":"a","query_vector":[1],"k":2,"num_candidates":10,"filter":{"bool":{"filter":[{"term":{"x":1}},{"term":{"org_id":"org_1"}}]}}},'
+            . '{"field":"b","query_vector":[1],"k":2,"num_candidates":10,"filter":{"bool":{"filter":[{"term":{"org_id":"org_1"}}]}}}]',
+            json_encode($scoped['knn']),
+        );
+    }
+
+    /**
+     * Since 8.12 `knn` is also a query clause; anywhere it sits it gathers neighbours, and unscoped, whether a
+     * tenant's document is among them would tell where the other tenants' vectors lie.
+     *
+     * @return iterable<string, array{array<string, mixed>, string}>
+     */
+    public static function knnPlacements(): iterable
+    {
+        $knn = ['knn' => ['field' => 'v', 'query_vector' => [1.0], 'k' => 1, 'num_candidates' => 1]];
+        $scoped = '{"knn":{"field":"v","query_vector":[1],"k":1,"num_candidates":1,"filter":{"bool":{"filter":[{"term":{"org_id":"org_1"}}]}}}}';
+        yield 'as a query clause' => [['query' => ['bool' => ['should' => [$knn]]]], '"should":[' . $scoped . ']'];
+        yield 'in a post filter' => [['query' => ['match_all' => new stdClass()], 'post_filter' => $knn], '"post_filter":' . $scoped];
+        yield 'in a rescore query' => [['query' => ['match_all' => new stdClass()], 'rescore' => ['query' => ['rescore_query' => $knn]]], '"rescore_query":' . $scoped];
+        yield 'in a highlight query' => [['query' => ['match_all' => new stdClass()], 'highlight' => ['fields' => ['t' => ['highlight_query' => $knn]]]], '"highlight_query":' . $scoped];
+        yield 'as decoded JSON objects' => [['query' => json_decode('{"bool":{"should":[{"knn":{"field":"v","query_vector":[1.0],"k":1,"num_candidates":1}}]}}')], '"should":[' . $scoped . ']'];
+        yield 'inside a top-level entry\'s filter' => [
+            ['knn' => ['field' => 'w', 'query_vector' => [0.0], 'k' => 3, 'num_candidates' => 3, 'filter' => $knn]],
+            '"filter":{"bool":{"filter":[' . $scoped . ',{"term":{"org_id":"org_1"}}]}}',
+        ];
+        yield 'inside a top-level entry\'s filter list' => [
+            ['knn' => ['field' => 'w', 'query_vector' => [0.0], 'k' => 3, 'num_candidates' => 3, 'filter' => [$knn]]],
+            '"filter":{"bool":{"filter":[' . $scoped . ',{"term":{"org_id":"org_1"}}]}}',
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $body
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('knnPlacements')]
+    public function testScopeReachesAKnnQueryAnywhereInTheBody(array $body, string $expected): void
+    {
+        $scoped = (new QueryCompiler())->scope($body, [Filter::term('org_id', 'org_1')]);
+
+        self::assertStringContainsString($expected, (string) json_encode($scoped));
+    }
+
+    public function testScopeKeepsEmptyObjectsAsObjects(): void
+    {
+        $scoped = (new QueryCompiler())->scope(['query' => ['match_all' => new stdClass()], 'highlight' => ['fields' => ['title' => new stdClass()]]], [Filter::term('org_id', 'org_1')]);
+
+        self::assertStringContainsString('"match_all":{}', (string) json_encode($scoped));
+        self::assertStringContainsString('"title":{}', (string) json_encode($scoped));
+    }
+
+    public function testAReferenceHiddenInASerializableObjectIsStillRefused(): void
+    {
+        $lookup = new class implements \JsonSerializable {
+            /**
+             * @return array<string, string>
+             */
+            public function jsonSerialize(): array
+            {
+                return ['index' => 'products', 'id' => 'globex:p1', 'path' => 'brand'];
+            }
+        };
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        (new QueryCompiler())->scope(['query' => ['terms' => ['brand' => $lookup]]], [Filter::term('org_id', 'org_1')]);
     }
 
     /**
@@ -121,7 +186,7 @@ final class QueryCompilerTest extends TestCase
 
         $scoped = (new QueryCompiler())->scope($body, [Filter::term('org_id', 'org_1')]);
 
-        self::assertSame($body['query'], $scoped['query']['bool']['must'][0]);
+        self::assertSame(json_encode($body['query']), json_encode($scoped['query']['bool']['must'][0]));
     }
 
     /**
@@ -152,8 +217,8 @@ final class QueryCompilerTest extends TestCase
         $scoped = (new QueryCompiler())->scope(['query' => ['function_score' => ['query' => ['match' => ['title' => 'x']]]]], [Filter::term('org_id', 'org_1')]);
 
         self::assertSame(
-            ['bool' => ['must' => [['function_score' => ['query' => ['match' => ['title' => 'x']]]]], 'filter' => [['term' => ['org_id' => 'org_1']]]]],
-            $scoped['query'],
+            '{"bool":{"must":[{"function_score":{"query":{"match":{"title":"x"}}}}],"filter":[{"term":{"org_id":"org_1"}}]}}',
+            json_encode($scoped['query']),
         );
     }
 }

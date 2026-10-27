@@ -51,6 +51,7 @@ abstract class ElasticsearchConformance extends EngineConformanceTestCase
             'function score' => static fn(): array => ['query' => ['function_score' => ['query' => ['match_all' => new stdClass()], 'random_score' => new stdClass()]], 'size' => 100],
             'knn only' => static fn(): array => ['knn' => ['field' => 'embedding', 'query_vector' => [1.0, 0.0, 0.0], 'k' => 5, 'num_candidates' => 10], 'size' => 100],
             'knn list' => static fn(): array => ['knn' => [['field' => 'embedding', 'query_vector' => [0.0, 1.0, 0.0], 'k' => 5, 'num_candidates' => 10]], 'size' => 100],
+            'knn query' => static fn(): array => ['query' => ['knn' => ['field' => 'embedding', 'query_vector' => [0.0, 1.0, 0.0], 'k' => 5, 'num_candidates' => 10]], 'size' => 100],
             'post filter' => static fn(): array => ['query' => ['match_all' => new stdClass()], 'post_filter' => ['exists' => ['field' => 'sku']], 'size' => 100],
         ];
     }

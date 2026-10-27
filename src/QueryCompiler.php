@@ -23,18 +23,20 @@ use Orion\Support\Assert;
 use stdClass;
 
 use function array_filter;
-use function array_is_list;
 use function array_map;
 use function array_values;
 use function count;
 use function implode;
 use function in_array;
 use function is_array;
-use function is_object;
+use function json_decode;
+use function json_encode;
 use function max;
 use function min;
 use function rtrim;
 use function sprintf;
+
+use const JSON_THROW_ON_ERROR;
 
 /**
  * The neutral query AST compiled to an Elasticsearch search body: a pure function, so the same query always
@@ -55,6 +57,9 @@ final class QueryCompiler
      * tenant's document even though only the tenant's documents come back.
      */
     private const array REFERENCE_KEYS = ['index', '_index', 'more_like_this', 'percolate', 'indexed_shape', 'wrapper'];
+
+    /** How deep a native body may nest, as JSON. */
+    private const int MAX_DEPTH = 64;
 
     /** Candidates per k-NN shard: ten times k, within Elasticsearch's bounds. */
     private const int CANDIDATE_FACTOR = 10;
@@ -119,7 +124,12 @@ final class QueryCompiler
      * A native body restricted by neutral filters, for the scoped escape hatch. Under a scope only keys that act
      * within the matched documents are accepted; anything that reads index-wide (aggregations, suggesters,
      * retrievers, runtime fields, scripts) is refused, because the scope is what keeps one tenant from another.
-     * The filters are ANDed with the query (when there is one) and with every k-NN entry.
+     * The body is first taken as the JSON it would be sent as (objects as objects, lists as lists), so what is
+     * scoped is what the engine reads. The filters are ANDed with the query (when there is one) and, wherever a
+     * `knn` sits (the top-level entries, the `knn` query clause of 8.12 and later in the query, a post filter, a
+     * rescore, a highlight query, another entry's filter), into its own filter, so the neighbours are gathered
+     * within the scope: gathered across it, whether a tenant's document came back would tell where the other
+     * tenants' vectors lie.
      *
      * @param array<array-key, mixed> $body
      * @param array<Filter> $scope
@@ -135,28 +145,66 @@ final class QueryCompiler
                 throw new InvalidArgumentException(sprintf('A scoped native query cannot use %s: it reads outside the scope. Allowed: %s.', Assert::show((string) $key), implode(', ', self::SCOPED_KEYS)));
             }
         }
+        $body = (array) json_decode(json_encode($body, JSON_THROW_ON_ERROR), false, self::MAX_DEPTH, JSON_THROW_ON_ERROR);
         self::refuseReferences($body);
         $filters = array_map($this->filter(...), array_values($scope));
+        $body = self::filterKnn($body, $filters);
         if (isset($body['query']) || !isset($body['knn'])) {
             $body['query'] = ['bool' => ['must' => [$body['query'] ?? ['match_all' => new stdClass()]], 'filter' => $filters]];
-        }
-        if (isset($body['knn'])) {
-            $entries = is_array($body['knn']) && array_is_list($body['knn']) ? $body['knn'] : [$body['knn']];
-            $body['knn'] = array_map(static function (mixed $entry) use ($filters): array {
-                $entry = (array) $entry;
-                $existing = $entry['filter'] ?? [];
-                $existing = is_array($existing) && array_is_list($existing) ? $existing : [$existing];
-                $entry['filter'] = [...$existing, ...$filters];
-
-                return $entry;
-            }, $entries);
         }
 
         return $body;
     }
 
     /**
-     * @param array<array-key, mixed> $node
+     * The node with every `knn` in it, at any depth, its filter ANDed with the scope; objects stay objects.
+     *
+     * @param list<array<string, mixed>> $filters
+     */
+    private static function filterKnn(mixed $node, array $filters): mixed
+    {
+        if (!is_array($node) && !$node instanceof stdClass) {
+            return $node;
+        }
+        $scoped = [];
+        foreach ((array) $node as $key => $value) {
+            $scoped[$key] = $key === 'knn' ? self::filterKnnEntries($value, $filters) : self::filterKnn($value, $filters);
+        }
+
+        return $node instanceof stdClass ? (object) $scoped : $scoped;
+    }
+
+    /**
+     * @param mixed $knn one entry (a `knn` query clause, or the top-level search option) or a list of them
+     * @param list<array<string, mixed>> $filters
+     */
+    private static function filterKnnEntries(mixed $knn, array $filters): mixed
+    {
+        if (is_array($knn)) {
+            return array_map(static fn(mixed $entry): mixed => self::filterKnnEntry($entry, $filters), $knn);
+        }
+
+        return self::filterKnnEntry($knn, $filters);
+    }
+
+    /**
+     * @param list<array<string, mixed>> $filters
+     */
+    private static function filterKnnEntry(mixed $entry, array $filters): mixed
+    {
+        if (!$entry instanceof stdClass) {
+            return self::filterKnn($entry, $filters);
+        }
+        $entry = (array) $entry;
+        $existing = $entry['filter'] ?? [];
+        $existing = array_map(static fn(mixed $filter): mixed => self::filterKnn($filter, $filters), is_array($existing) ? $existing : [$existing]);
+        $entry['filter'] = ['bool' => ['filter' => [...$existing, ...$filters]]];
+
+        return (object) $entry;
+    }
+
+    /**
+     * @param array<array-key, mixed> $node decoded JSON: arrays and stdClass only
      */
     private static function refuseReferences(array $node): void
     {
@@ -164,7 +212,7 @@ final class QueryCompiler
             if (in_array($key, self::REFERENCE_KEYS, true)) {
                 throw new InvalidArgumentException(sprintf('A scoped native query cannot use %s: it reads documents outside the scope by reference.', Assert::show((string) $key)));
             }
-            if (is_array($value) || is_object($value)) {
+            if (is_array($value) || $value instanceof stdClass) {
                 self::refuseReferences((array) $value);
             }
         }

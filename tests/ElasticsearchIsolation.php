@@ -14,6 +14,7 @@ use stdClass;
 
 use function base64_encode;
 use function getenv;
+use function json_decode;
 
 /**
  * Runs the tenancy isolation case against the server at the URL in {@see urlVariable()}; skipped when it is unset.
@@ -46,10 +47,28 @@ abstract class ElasticsearchIsolation extends TenancyIsolationTestCase
             'foreign ids' => static fn(): array => ['query' => ['ids' => ['values' => ['globex:p1', 'globex:p4']]], 'size' => 100],
             'the foreign tenant by name' => static fn(): array => ['query' => ['term' => ['org_id' => 'globex']], 'size' => 100],
             'should with match all' => static fn(): array => ['query' => ['bool' => ['should' => [['term' => ['org_id' => 'globex']], ['match_all' => new stdClass()]]]], 'size' => 100],
-            'knn at the foreign tenant' => static fn(): array => ['knn' => ['field' => 'embedding', 'query_vector' => [0.0, 1.0, 0.0], 'k' => 10, 'num_candidates' => 100], 'size' => 100],
             'knn list filtered to the foreign tenant' => static fn(): array => ['knn' => [['field' => 'embedding', 'query_vector' => [0.0, 1.0, 0.0], 'k' => 10, 'num_candidates' => 100, 'filter' => ['term' => ['org_id' => 'globex']]]], 'size' => 100],
             'post filter' => static fn(): array => ['query' => ['match_all' => new stdClass()], 'post_filter' => ['term' => ['org_id' => 'globex']], 'size' => 100],
             'collapse' => static fn(): array => ['query' => ['match_all' => new stdClass()], 'collapse' => ['field' => 'brand'], 'size' => 100],
+        ];
+    }
+
+    /**
+     * k-NN aimed at the foreign tenant's nearest vector, one per placement: the top-level entry and, since 8.12, the
+     * `knn` query clause wherever a query may sit.
+     */
+    protected function nativeProbes(): array
+    {
+        $knn = ['knn' => ['field' => 'embedding', 'query_vector' => [0.0, 1.0, 0.0], 'k' => 1, 'num_candidates' => 10]];
+
+        return [
+            'knn at the foreign tenant' => static fn(): array => [...$knn, 'size' => 100],
+            'knn query at the foreign tenant' => static fn(): array => ['query' => $knn, 'size' => 100],
+            'knn query at the foreign tenant in a bool' => static fn(): array => ['query' => ['bool' => ['must' => [$knn]]], 'size' => 100],
+            'knn query at the foreign tenant in a post filter' => static fn(): array => ['query' => ['match_all' => new stdClass()], 'post_filter' => $knn, 'size' => 100],
+            'knn query at the foreign tenant in a rescore' => static fn(): array => ['query' => ['match_all' => new stdClass()], 'rescore' => ['window_size' => 10, 'query' => ['rescore_query' => $knn, 'query_weight' => 0]], 'size' => 100],
+            'knn query at the foreign tenant inside a knn filter' => static fn(): array => ['knn' => ['field' => 'embedding', 'query_vector' => [0.0, 1.0, 0.0], 'k' => 10, 'num_candidates' => 100, 'filter' => $knn], 'size' => 100],
+            'knn query at the foreign tenant as decoded JSON' => static fn(): array => ['query' => json_decode('{"knn":{"field":"embedding","query_vector":[0.0,1.0,0.0],"k":1,"num_candidates":10}}'), 'size' => 100],
         ];
     }
 
