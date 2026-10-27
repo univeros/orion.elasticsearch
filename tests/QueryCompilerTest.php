@@ -7,6 +7,7 @@ namespace Orion\Elasticsearch\Tests;
 use Orion\Adapter\UnsupportedClause;
 use Orion\Elasticsearch\QueryCompiler;
 use Orion\Query\Direction;
+use Orion\Query\Clause;
 use Orion\Query\Filter;
 use Orion\Query\Fusion;
 use Orion\Query\Query;
@@ -36,6 +37,20 @@ final class QueryCompilerTest extends TestCase
             . '"highlight":{"encoder":"html","pre_tags":["<em>"],"post_tags":["<\/em>"],"fields":{"title":{}}}}',
             json_encode((new QueryCompiler())->compile($query)),
         );
+    }
+
+    public function testAMatchOverSeveralWeightedFieldsIsAMultiMatch(): void
+    {
+        $body = (new QueryCompiler())->compile(Query::on('products')->match(['title' => 3.0, 'description' => 1.0], 'shoe'));
+
+        self::assertSame(['multi_match' => ['query' => 'shoe', 'fields' => ['title^3', 'description'], 'type' => 'best_fields']], $body['query']['bool']['must'][0]);
+    }
+
+    public function testAWeightedClauseCarriesItsBoost(): void
+    {
+        $body = (new QueryCompiler())->compile(Query::on('products')->withClauses([Clause::match('title', 'shoe')->weighted(['title' => 0.25]), Clause::prefix('sku', 'A')->weighted(['sku' => 2.0])]));
+
+        self::assertSame([['match' => ['title' => ['query' => 'shoe', 'boost' => 0.25]]], ['prefix' => ['sku' => ['value' => 'A', 'boost' => 2.0]]]], $body['query']['bool']['must']);
     }
 
     public function testAVectorQueryPreFiltersTheNeighbours(): void

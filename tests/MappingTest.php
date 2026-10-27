@@ -121,4 +121,12 @@ final class MappingTest extends TestCase
         self::assertTrue($field->sortable);
         self::assertTrue($field->facetable);
     }
+
+    public function testVectorFieldsAreLeftOutOfTheSourceOnEveryVersion(): void
+    {
+        $schema = IndexSchema::for('products')->text('title')->vector('embedding', 3)->with(Field::object('variants', Field::vector('vec', 2)));
+
+        self::assertSame(['embedding', 'variants.vec'], Mapping::create($schema, 'elasticsearch')['mappings']['_source']['excludes']);
+        self::assertArrayNotHasKey('_source', Mapping::create(IndexSchema::for('products')->text('title'), 'elasticsearch')['mappings']);
+    }
 }

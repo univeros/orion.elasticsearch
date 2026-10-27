@@ -69,8 +69,30 @@ final class Mapping
         $body = array_replace_recursive($body, $native);
         $body['mappings']['dynamic'] = $mappings['dynamic'];
         $body['mappings']['_meta'] = $mappings['_meta'];
+        // No engine returns vectors in a hit: 9.x leaves dense_vector out of _source on its own, 8.19 when told to.
+        $vectors = self::vectorPaths($schema->fields);
+        if ($vectors !== []) {
+            $body['mappings']['_source'] = ['excludes' => $vectors];
+        }
 
         return $body;
+    }
+
+    /**
+     * @param list<Field> $fields
+     * @return list<string> dotted paths of the vector fields
+     */
+    private static function vectorPaths(array $fields, string $prefix = ''): array
+    {
+        $paths = [];
+        foreach ($fields as $field) {
+            if ($field->type === FieldType::Vector) {
+                $paths[] = $prefix . $field->name;
+            }
+            $paths = [...$paths, ...self::vectorPaths($field->fields, $prefix . $field->name . '.')];
+        }
+
+        return $paths;
     }
 
     /**

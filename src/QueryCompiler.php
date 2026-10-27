@@ -26,12 +26,14 @@ use function array_filter;
 use function array_is_list;
 use function array_map;
 use function array_values;
+use function count;
 use function implode;
 use function in_array;
 use function is_array;
 use function is_object;
 use function max;
 use function min;
+use function rtrim;
 use function sprintf;
 
 /**
@@ -197,12 +199,31 @@ final class QueryCompiler
      */
     private function clause(Clause $clause): array
     {
+        if ($clause->kind === ClauseKind::Match && count($clause->fields) > 1) {
+            $fields = [];
+            foreach ($clause->fields as $field => $weight) {
+                $fields[] = $weight === Clause::DEFAULT_WEIGHT ? $field : $field . '^' . self::weight($weight);
+            }
+
+            return ['multi_match' => ['query' => $clause->value, 'fields' => $fields, 'type' => 'best_fields']];
+        }
+        $weight = $clause->fields[$clause->field];
+        $boost = $weight === Clause::DEFAULT_WEIGHT ? [] : ['boost' => $weight];
+
         return match ($clause->kind) {
-            ClauseKind::Match => ['match' => [$clause->field => ['query' => $clause->value]]],
-            ClauseKind::Term => ['term' => [$clause->field => ['value' => $clause->value]]],
-            ClauseKind::Prefix => ['prefix' => [$clause->field => ['value' => $clause->value]]],
-            ClauseKind::Phrase => ['match_phrase' => [$clause->field => ['query' => $clause->value]]],
+            ClauseKind::Match => ['match' => [$clause->field => ['query' => $clause->value, ...$boost]]],
+            ClauseKind::Term => ['term' => [$clause->field => ['value' => $clause->value, ...$boost]]],
+            ClauseKind::Prefix => ['prefix' => [$clause->field => ['value' => $clause->value, ...$boost]]],
+            ClauseKind::Phrase => ['match_phrase' => [$clause->field => ['query' => $clause->value, ...$boost]]],
         };
+    }
+
+    /**
+     * A weight in a `fields` entry: a plain decimal, never exponent notation, which Elasticsearch would not parse.
+     */
+    private static function weight(float $weight): string
+    {
+        return rtrim(rtrim(sprintf('%.6F', $weight), '0'), '.');
     }
 
     /**
