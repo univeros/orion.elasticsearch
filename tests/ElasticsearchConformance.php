@@ -39,6 +39,11 @@ abstract class ElasticsearchConformance extends EngineConformanceTestCase
         return static fn(): array => ['query' => ['match_all' => new stdClass()], 'size' => 100];
     }
 
+    protected function compiledAsNative(array $compiled): ?callable
+    {
+        return static fn(): mixed => $compiled['body'] ?? null;
+    }
+
     protected function nativeShapes(): array
     {
         return [

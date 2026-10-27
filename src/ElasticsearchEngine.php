@@ -11,6 +11,7 @@ use InvalidArgumentException;
 use LogicException;
 use Orion\Adapter\Capability;
 use Orion\Adapter\PendingTask;
+use Orion\Adapter\QueryCompiling;
 use Orion\Adapter\RequiresReindex;
 use Orion\Adapter\SchemaAdapter;
 use Orion\Adapter\SearchAdapter;
@@ -52,7 +53,7 @@ use function sprintf;
  * conflict is a stale write, never a failure. `raw()` takes `callable(): array` returning a search body.
  * Native hybrid fusion (the RRF retriever) needs a paid license, so it is reported false and core fuses instead.
  */
-final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAdapter
+final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAdapter, QueryCompiling
 {
     public const string NAME = 'elasticsearch';
     private const array CAPABILITIES = [
@@ -86,10 +87,27 @@ final class ElasticsearchEngine implements SearchAdapter, SchemaAdapter, WriteAd
         return in_array($capability, self::CAPABILITIES, true);
     }
 
+    /**
+     * The parameters `search()` hands the client: the index and the search body.
+     */
+    #[Override]
+    public function compile(IndexName $index, Query $query): array
+    {
+        return $this->request($index, $query);
+    }
+
     #[Override]
     public function search(IndexName $index, Query $query): ResultSet
     {
-        return $this->results($this->call($this->client->search(['index' => $index->value, 'body' => $this->compiler->compile($query)])));
+        return $this->results($this->call($this->client->search($this->request($index, $query))));
+    }
+
+    /**
+     * @return array{index: string, body: array<string, mixed>}
+     */
+    private function request(IndexName $index, Query $query): array
+    {
+        return ['index' => $index->value, 'body' => $this->compiler->compile($query)];
     }
 
     #[Override]
