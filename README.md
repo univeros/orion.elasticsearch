@@ -3,6 +3,10 @@
 Orion's engine adapter for Elasticsearch 8.19 and 9.x, on the official `elasticsearch/elasticsearch` client
 (install the client major that matches your server: client 9 cannot talk to an 8.x cluster).
 
+```sh
+composer require orion-search/elasticsearch
+```
+
 ```php
 use Elastic\Elasticsearch\ClientBuilder;
 use Orion\Elasticsearch\ElasticsearchEngine;
@@ -20,3 +24,5 @@ $engines = new EngineRegistry(elasticsearch: new ElasticsearchEngine(ClientBuild
 - Native hybrid fusion (the RRF retriever) needs a paid license, so `HybridFusion` is reported false and core fuses.
 
 Proven by `Orion\Testing\EngineConformanceTestCase` against Elasticsearch 9.5 and 8.19.
+
+Connecting it and how it compares with the other engines: the [Engines guide](../../docs/guides/engines.md#elasticsearch).
